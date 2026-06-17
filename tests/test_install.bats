@@ -45,6 +45,22 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "install: --update --cmd updates the named skill even when a backup skill exists" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local backup="$FAKE_HOME/.agents/skills/agmsg.backup-keep"
+  mkdir -p "$backup/scripts" "$backup/templates" "$backup/db" "$backup/agents"
+  touch "$backup/.agmsg"
+  echo "backup sentinel" > "$backup/SKILL.md"
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Updating agmsg..." ]]
+  [[ ! "$output" =~ "Updating agmsg.backup-keep" ]]
+  [ ! -f "$FAKE_HOME/.agents/agmsg.ps1" ]
+  [ ! -f "$FAKE_HOME/.agents/agmsg.backup-keep.ps1" ]
+  grep -q "backup sentinel" "$backup/SKILL.md"
+}
+
 @test "install: AGMSG_STORAGE_PATH override works against the installed skill" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local store="$FAKE_HOME/override-store"
@@ -76,6 +92,19 @@ teardown() {
 # previous watch.sh running but invisible to every cleanup pathway (pidfile
 # got overwritten). watch.sh now self-cleans the previous holder of its
 # pidfile at startup. See #66.
+wait_for_pidfile_pid() {
+  local file="$1" expected="$2"
+  local i actual
+  for i in $(seq 1 30); do
+    if [ -f "$file" ]; then
+      actual="$(cat "$file")"
+      [ "$actual" = "$expected" ] && return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 @test "install: drops a Copilot SKILL.md when ~/.copilot exists" {
   mkdir -p "$FAKE_HOME/.copilot"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
@@ -124,47 +153,52 @@ teardown() {
   grep -q "whoami.sh \"\$(pwd)\" copilot" "$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
 }
 
-@test "install: Windows helpers are generated with the selected command name" {
+@test "install: Windows PowerShell launcher stays under the skill tree" {
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd msg
 
-  [ -f "$FAKE_HOME/.agents/msg.ps1" ]
-  [ -f "$FAKE_HOME/.agents/msg-run.sh" ]
-  [ -f "$FAKE_HOME/.agents/bin/sqlite3" ]
-  [ -x "$FAKE_HOME/.agents/msg-run.sh" ]
-  [ -x "$FAKE_HOME/.agents/bin/sqlite3" ]
-
-  grep -q "function msg" "$FAKE_HOME/.agents/msg.ps1"
-  grep -q '\$HOME/.agents/msg-run.sh' "$FAKE_HOME/.agents/msg.ps1"
-  grep -q 'SKILL_NAME="${AGMSG_SKILL_NAME:-msg}"' "$FAKE_HOME/.agents/msg-run.sh"
-  ! grep -q "__SKILL_NAME__" "$FAKE_HOME/.agents/msg.ps1"
-  ! grep -q "__SKILL_NAME__" "$FAKE_HOME/.agents/msg-run.sh"
+  [ ! -f "$FAKE_HOME/.agents/msg.ps1" ]
+  [ ! -f "$FAKE_HOME/.agents/msg-run.sh" ]
+  [ ! -f "$FAKE_HOME/.agents/bin/sqlite3" ]
+  [ -f "$FAKE_HOME/.agents/skills/msg/scripts/windows/agmsg.ps1" ]
+  [ -f "$FAKE_HOME/.agents/skills/msg/scripts/windows/install-agmsg.ps1" ]
+  [ -f "$FAKE_HOME/.agents/skills/msg/scripts/dispatch.sh" ]
 }
 
-@test "install --update: restores Windows helpers" {
+@test "install --update: removes legacy Windows runner and sqlite shim" {
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
-  echo "tampered" > "$FAKE_HOME/.agents/agmsg-run.sh"
+  echo "legacy runner" > "$FAKE_HOME/.agents/agmsg-run.sh"
+  mkdir -p "$FAKE_HOME/.agents/bin"
+  mkdir -p "$FAKE_HOME/.agents/run"
+  cat > "$FAKE_HOME/.agents/bin/sqlite3" <<'SHIM'
+#!/usr/bin/env bash
+# sqlite3 compatibility shim for agmsg on native Windows / Git Bash.
+exit 1
+SHIM
+  chmod +x "$FAKE_HOME/.agents/bin/sqlite3"
+  echo "/usr/bin/sqlite3" > "$FAKE_HOME/.agents/run/sqlite3-shim.cache"
+  cat > "$FAKE_HOME/.agents/agmsg.ps1" <<'PS1'
+# PowerShell shortcut for agmsg on native Windows.
+function agmsg {
+    & 'C:\Users\example\.agents\skills\agmsg\scripts\windows\agmsg.ps1' @args
+}
+PS1
 
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
 
-  ! grep -q "^tampered$" "$FAKE_HOME/.agents/agmsg-run.sh"
-  grep -q 'SKILL_NAME="${AGMSG_SKILL_NAME:-agmsg}"' "$FAKE_HOME/.agents/agmsg-run.sh"
+  [ ! -f "$FAKE_HOME/.agents/agmsg.ps1" ]
+  [ ! -f "$FAKE_HOME/.agents/agmsg-run.sh" ]
+  [ ! -f "$FAKE_HOME/.agents/bin/sqlite3" ]
+  [ ! -f "$FAKE_HOME/.agents/run/sqlite3-shim.cache" ]
 }
 
-@test "windows runner: sends and receives messages through AGMSG environment values" {
+@test "install: Windows dispatcher is shipped with the skill scripts" {
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
-  bash "$SK/scripts/join.sh" demo alice codex /tmp/agmsg-win-a
-  bash "$SK/scripts/join.sh" demo bob codex /tmp/agmsg-win-b
 
-  local msg="hello with spaces and 'quotes'"
-  HOME="$FAKE_HOME" AGMSG_TEAM=demo AGMSG_AGENT=alice AGMSG_SUB=send AGMSG_TO=bob AGMSG_MSG="$msg" \
-    bash "$FAKE_HOME/.agents/agmsg-run.sh"
-
-  run env HOME="$FAKE_HOME" AGMSG_TEAM=demo AGMSG_AGENT=bob AGMSG_SUB=inbox \
-    bash "$FAKE_HOME/.agents/agmsg-run.sh"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "$msg" ]]
-  [[ "$output" != *"^_"* ]]
-  [ -f "$FAKE_HOME/.agents/run/sqlite3-shim.cache" ]
+  [ -f "$SK/scripts/windows/agmsg.ps1" ]
+  [ -f "$SK/scripts/windows/install-agmsg.ps1" ]
+  [ -f "$SK/scripts/dispatch.sh" ]
+  [ ! -f "$SK/scripts/windows/agmsg-run.sh" ]
+  [ ! -f "$SK/scripts/windows/sqlite3-shim.sh" ]
 }
 
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {
@@ -208,17 +242,11 @@ teardown() {
 
   bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
   local first=$!
-  # Give the first watcher long enough to write the pidfile and enter its
-  # poll loop. The sleep is short — if it's flaky, raise to 0.5s.
-  sleep 0.3
-  [ -f "$SK/run/watch.$sid.pid" ]
-  [ "$(cat "$SK/run/watch.$sid.pid")" -eq "$first" ]
+  wait_for_pidfile_pid "$SK/run/watch.$sid.pid" "$first"
 
   bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
   local second=$!
-  sleep 0.3
-  # New pid wrote the pidfile.
-  [ "$(cat "$SK/run/watch.$sid.pid")" -eq "$second" ]
+  wait_for_pidfile_pid "$SK/run/watch.$sid.pid" "$second"
   # And the previous one was actually killed.
   run kill -0 "$first"
   [ "$status" -ne 0 ]

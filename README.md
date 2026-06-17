@@ -109,19 +109,18 @@ The **command name** determines:
 
 After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity) so it picks up the new skill.
 
-### Native Windows / PowerShell shortcut
+### Native Windows / PowerShell profile function
 
-When `install.sh` runs under Git Bash on Windows, it also installs optional native helpers:
-
-- `~/.agents/agmsg.ps1` — a PowerShell function wrapper
-- `~/.agents/agmsg-run.sh` — the Git Bash runner used by that wrapper
-- `~/.agents/bin/sqlite3` — a compatibility shim for Windows `sqlite3.exe` output
-
-To enable the PowerShell command, dot-source the generated file from your PowerShell profile:
+When `install.sh` runs under Git Bash on Windows, it installs the PowerShell
+launcher under the skill tree. To enable an `agmsg` PowerShell command, add the
+profile function from the PowerShell host you use:
 
 ```powershell
-. "$HOME\.agents\agmsg.ps1"
+pwsh -ExecutionPolicy Bypass -File "$HOME\.agents\skills\agmsg\scripts\windows\install-agmsg.ps1"
 ```
+
+Use `powershell` instead of `pwsh` if you use Windows PowerShell rather than
+PowerShell 7; each host has its own profile path.
 
 Then a PowerShell session can run:
 
@@ -133,7 +132,11 @@ agmsg send alice "hello from PowerShell"
 agmsg mode turn
 ```
 
-The installer prints the same profile line but does not modify your profile automatically.
+The PowerShell launcher delegates to the existing Bash scripts; it does not
+reimplement agmsg logic or read the SQLite database directly. Git Bash and
+`sqlite3` must both be available from the Windows environment. See
+[Windows PowerShell launcher](docs/windows.md) for details and an optional
+profile installer.
 
 ## First run
 
@@ -386,6 +389,63 @@ Claude Code's sandbox restricts filesystem writes to the project directory. In `
 This can also go in project-level `.claude/settings.local.json` if you prefer per-project scope. The allowlist merges across all settings scopes and takes effect immediately — no restart needed.
 
 If you installed agmsg under a custom command name (e.g. `m`), adjust the path accordingly (`~/.agents/skills/m/`).
+
+### Sandbox compatibility (Codex)
+
+Codex may run shell commands in a workspace-write sandbox. agmsg stores its
+SQLite database and team metadata under `~/.agents/skills/<cmd>/` by default,
+which is outside most project workspaces. If the sandbox cannot write there,
+commands that append or update state can fail with errors such as
+`sqlite3.OperationalError: unable to open database file`.
+
+This affects operations such as:
+
+- sending messages (`send.sh` writes to `db/messages.db`)
+- marking inbox rows as read (`inbox.sh` updates `read_at`)
+- joining, resetting, switching roles, or changing delivery mode (`teams/` and
+  config/state files may be updated)
+
+If you use Codex with filesystem sandboxing enabled, allow writes to the agmsg
+skill storage directory in your Codex config.
+
+Example `~/.codex/config.toml`:
+
+```toml
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+writable_roots = [
+  "~/.agents/skills/agmsg/db",
+  "~/.agents/skills/agmsg/teams",
+]
+```
+
+If you installed agmsg under a custom command name, adjust the path accordingly:
+
+```toml
+[sandbox_workspace_write]
+writable_roots = [
+  "~/.agents/skills/m/db",
+  "~/.agents/skills/m/teams",
+]
+```
+
+You can also allow the whole skill directory if your Codex setup supports that:
+
+```toml
+[sandbox_workspace_write]
+writable_roots = [
+  "~/.agents/skills/agmsg",
+]
+```
+
+Codex only supports `mode turn` and `mode off`; it does not have Claude Code's
+Monitor tool. The sandbox allowlist is still required for writes performed by
+manual `$agmsg` commands and turn-end inbox checks.
+
+Some Codex runtimes or automations may inject a managed permission profile for a
+single run. In that case, the run-specific writable roots must also include the
+agmsg storage paths; the user-level config alone may not be enough.
 
 ## Tests
 
